@@ -1,0 +1,598 @@
+# 이 파일은 kevinsu92/scholarship-deadline의 .github/workflows/feed.yml에서 만든 사본입니다(feed-sync.yml이 올림 — 여기서 고치지 않습니다).
+name: feed
+run-name: ${{ inputs.groups && format('feed · 묶음 {0}', inputs.groups) || (inputs.extract_only || inputs.extract_accept || inputs.extract_reject) && 'feed · 추출' || inputs.trigger == 'cron-worker' && !(inputs.groups || inputs.extract_only || inputs.extract_only_strict || inputs.extract_force || inputs.extract_model || inputs.extract_effort || inputs.extract_accept || inputs.extract_reject || inputs.include_recent) && (inputs.token_days && 'feed · 대신 부르기' || 'feed · 대신 부르기(손)') || 'feed' }}
+
+on:
+  schedule:
+    - cron: "17 23,8 * * *"
+  workflow_dispatch:
+    inputs:
+      extract_only:
+        description: "추출 전 거르기를 건너뛰고 이 공고만 추출 — id를 쉼표로"
+        required: false
+        default: ''
+      extract_only_strict:
+        description: "비상용: extract_only로 고른 공고만 추출하고 그 게시판의 다른 새 글은 추출하지 않는다 — 학생이 못 보는 공고가 생긴다(주기 게시판은 최대 6일, 매 실행 읽는 출처는 다음 정기 실행까지, 경고로 알림). 보통은 끈 채로 둔다"
+        type: boolean
+        default: false
+      extract_force:
+        description: "extract_only로 고른 공고를 추출이 있어도 다시 추출 — 실패 기억도 푼다(extract_only 없이 켜면 추출 단계가 오류로 멈춘다)"
+        type: boolean
+        required: false
+        default: false
+      extract_model:
+        description: "비교용: 이 실행에서만 추출 모델을 바꾼다(비우면 저장소 변수 EXTRACT_MODEL) — extract_only가 없으면 멈추고, 이미 추출된 공고는 extract_force도 켠다. 고른 공고만 추출하고 결과는 extractions/_compare.json에만 남는다(피드·보류·실패 기억에 닿지 않고 3일 뒤 지워진다)"
+        type: choice
+        required: false
+        default: ''
+        options: ['', 'claude-sonnet-5-5', 'claude-opus-5-5']
+      extract_effort:
+        description: "비교용: 이 실행에서만 추출 노력을 바꾼다(비우면 저장소 변수 EXTRACT_EFFORT)"
+        type: choice
+        required: false
+        default: ''
+        options: ['', 'low', 'medium', 'high']
+      extract_accept:
+        description: "보류한 다시 추출(마감·조건이 바뀌어 싣지 않은 것)을 확인했으면 그 id를 쉼표로 — 이번 실행에서 확정해 싣는다"
+        required: false
+        default: ''
+      extract_reject:
+        description: "보류한 다시 추출이 원문과 다르면 그 id를 쉼표로 — 새 추출을 버리고 지난 추출을 그대로 싣는다(API를 부르지 않는다)"
+        required: false
+        default: ''
+      groups:
+        description: "이 묶음만 다시 읽기(collector/sources/README.md): 쉼표로 university/daegu-gyeongbuk·foundation… 또는 failed. 막힌 출처·robots 확인 보류·확인 필요·3시간 안에 요청한 출처·24시간 안에 정상 확인한 출처는 빼고, 한 번에 24곳까지. 대기 중인 실행(정기 실행 포함)은 새 실행이 오면 취소되니 도는·대기 중인 실행이 없고 정기·보조·대신 부르기 예약 실행(KST 08:17·08:47·10:07·12:17·12:47·14:07·17:17·17:47·19:07 — GitHub 예약은 몇 시간 늦게 오기도 한다) 앞뒤 15분이 아닐 때 누른다 — 대기 중인 손 실행은 뒤에 온 예약 실행에 밀려 알림 없이 취소될 수 있다"
+        required: false
+        default: ''
+      include_recent:
+        description: "groups로 고른 묶음에서 주기 안(24시간 넘음)에 확인한 출처도 읽는다"
+        type: boolean
+        required: false
+        default: false
+      trigger:
+        description: "예약 실행 대신 부르기 표지 — Cloudflare Worker cron(collector/dispatch)만 cron-worker로 쓴다. 이 값이면 문지기가 보조 예약 실행처럼 판정한다(2시간 40분 안 발행이면 건너뜀). 손으로는 비워 둔다(다른 입력과 함께 넣으면 손 실행으로 본다)"
+        required: false
+        default: ''
+      token_days:
+        description: "대신 부르기 Worker가 적는 토큰 남은 날(숫자 또는 unknown — 14일 이하면 문지기가 빨갛게 알린다). 손으로는 비워 둔다(비우면 실행 이름이 '대신 부르기(손)'이고 끊김 감시에 세지 않는다)"
+        required: false
+        default: ''
+
+concurrency:
+  group: feed-${{ github.ref == 'refs/heads/main' && 'main' || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  feed:
+    needs: guard
+    if: ${{ !cancelled() && needs.guard.outputs.skip != '1' && (vars.FEED_SCHEDULE_HERE == '1' || !(github.event_name == 'schedule' || inputs.trigger == 'cron-worker')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 56
+    environment: ${{ github.repository == 'kevinsu92/scholarship-deadline' && 'feed-publish' || 'feed-fallback' }}
+    env:
+      STATE_REPO: git@github.com:kevinsu92/scholarship-feed-state.git
+      FEED_TONGHAKRO: ${{ vars.FEED_TONGHAKRO }}
+    defaults:
+      run:
+        working-directory: collector
+    steps:
+      - name: main 가지만 발행
+        working-directory: ${{ runner.temp }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::main 가지가 아니라 멈춘다(의도한 멈춤 — 아래 단계의 오류는 이 때문이다) — 피드는 main에서만 수집·서명·발행한다"; exit 1; fi
+
+      - name: 공개 모드 로그 켜기
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          priv=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null || echo unknown)
+          if [ "$GITHUB_REPOSITORY" = "kevinsu92/scholarship-deadline" ] && [ "$priv" = "true" ]; then
+            { echo "LOG="; echo "PUBLIC_LOG="; } >> "$GITHUB_ENV"; echo "비공개 저장소 — 공개 모드 로그 끔"
+          else
+            { echo "LOG=node scripts/feed/public-log.mjs"; echo "PUBLIC_LOG=1"; } >> "$GITHUB_ENV"; echo "공개 모드 로그 켬"
+          fi
+
+      - name: 수집기 코드(비공개 저장소)
+        if: github.repository == 'kevinsu92/scholarship-deadline'
+        uses: actions/checkout@v4
+
+      - name: 수집기 코드(상태 저장소 collector 사본)
+        if: github.repository != 'kevinsu92/scholarship-deadline'
+        uses: actions/checkout@v4
+        with:
+          repository: kevinsu92/scholarship-feed-state
+          ref: collector
+          ssh-key: ${{ secrets.STATE_KEY }}
+          persist-credentials: false
+
+      - name: 상태 저장소 키
+        working-directory: ${{ runner.temp }}
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          if [ -z "$STATE_KEY" ]; then echo "::error::STATE_KEY 비밀값이 없음(상태 저장소 deploy key)"; exit 1; fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$STATE_KEY" > ~/.ssh/state_key && chmod 600 ~/.ssh/state_key
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+          echo 'STATE_SSH=ssh -i ~/.ssh/state_key -o IdentitiesOnly=yes' >> "$GITHUB_ENV"
+          if [ -f "$GITHUB_WORKSPACE/collector/.source-commit" ]; then echo "수집기 코드 main $(cut -c1-12 "$GITHUB_WORKSPACE/collector/.source-commit")"; fi
+
+      - name: 수집기 사본 확인(공개)
+        if: github.repository != 'kevinsu92/scholarship-deadline'
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pin=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/collector-pin?ref=main" --jq .content | base64 -d | tr -d ' \n')
+          head=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          if [ -z "$pin" ] || [ "$pin" != "$head" ]; then echo "::error::수집기 사본($head)이 공개 main의 collector-pin(${pin:-없음})과 다름 — feed-sync.yml을 다시 돌리거나 상태 저장소 키 유출을 의심한다"; exit 1; fi
+          echo "수집기 사본 핀 맞음 ${head:0:12}"
+
+      - name: 수집 자물쇠
+        working-directory: ${{ runner.temp }}
+        run: |
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          rm -rf "$RUNNER_TEMP/lock" && git init -q "$RUNNER_TEMP/lock" && cd "$RUNNER_TEMP/lock"
+          printf '%s %s %s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(date -u +%s)" > lock
+          git add lock && git -c user.name=feed-bot -c user.email=feed-bot@users.noreply.github.com commit -q -m "자물쇠 $GITHUB_RUN_ID"
+          if git push -q "$STATE_REPO" HEAD:refs/heads/feed-lock 2>/dev/null; then echo "LOCK_OWNED=1" >> "$GITHUB_ENV"; echo "자물쇠 잡음"; exit 0; fi
+          git fetch -q --depth=1 "$STATE_REPO" feed-lock
+          read -r lrepo lrun lat < <(git show FETCH_HEAD:lock)
+          age=$(( $(date -u +%s) - ${lat:-0} ))
+          if [ "$age" -gt 5400 ]; then
+            git push -q -f "$STATE_REPO" HEAD:refs/heads/feed-lock && echo "LOCK_OWNED=1" >> "$GITHUB_ENV"
+            echo "::warning::오래된 자물쇠($lrepo run $lrun, ${age}초)를 넘겨받음"; exit 0
+          fi
+          echo "::error::다른 수집 실행이 도는 중($lrepo run $lrun, ${age}초 전 시작) — 겹쳐 읽지 않게 멈춘다"; exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19'
+          cache: npm
+          cache-dependency-path: collector/package-lock.json
+
+      - name: 첨부 읽기 도구
+        run: sudo apt-get update -q && sudo apt-get install -y -q poppler-utils tesseract-ocr tesseract-ocr-kor
+
+      - name: 의존성
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: 원문·첨부 글자 캐시
+        id: cache
+        run: |
+          set -o pipefail
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          mkdir -p feed-work
+          for delay in 20 40 end; do
+            set +e; git ls-remote --exit-code --heads "$STATE_REPO" feed-cache >/dev/null; rc=$?; set -e
+            if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || [ "$delay" = end ]; then break; fi
+            echo "::warning::feed-cache 확인 실패(ls-remote $rc) — ${delay}초 뒤 다시"; sleep "$delay"
+          done
+          if [ "$rc" -eq 2 ]; then
+            echo "miss=1" >> "$GITHUB_OUTPUT"
+            if [ "$PUBLIC_LOG" = "1" ]; then echo "::error::feed-cache 가지가 없음 — 공개 저장소는 캐시 없이 돌지 않는다(옮기는 날 비공개 실행이 먼저 올린다)"; exit 1; fi
+            echo "::warning::feed-cache 가지가 없음 — 옛 Actions 캐시에서 이어 받는다"; exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then echo "::error::feed-cache를 확인하지 못함(ls-remote $rc, 세 번) — 캐시 없이 돌지 않는다"; exit 1; fi
+          rm -rf "$RUNNER_TEMP/cache-git" && git init -q "$RUNNER_TEMP/cache-git"
+          for delay in 20 40 end; do
+            git -C "$RUNNER_TEMP/cache-git" fetch -q --depth=1 "$STATE_REPO" feed-cache && break
+            if [ "$delay" = end ]; then echo "::error::feed-cache를 받지 못함(세 번)"; exit 1; fi
+            sleep "$delay"
+          done
+          git -C "$RUNNER_TEMP/cache-git" show FETCH_HEAD:cache.tar.gz > "$RUNNER_TEMP/cache.tar.gz"
+          tar -tzf "$RUNNER_TEMP/cache.tar.gz" >/dev/null
+          tar -xzf "$RUNNER_TEMP/cache.tar.gz" -C feed-work
+          echo "restored=1" >> "$GITHUB_OUTPUT"
+          echo "캐시 복원 $(du -sh "$RUNNER_TEMP/cache.tar.gz" | cut -f1)"
+
+      - name: 옛 Actions 캐시에서 이어 받기(한 번만)
+        id: oldcache
+        if: steps.cache.outputs.miss == '1' && github.repository == 'kevinsu92/scholarship-deadline'
+        uses: actions/cache/restore@v4
+        with:
+          fail-on-cache-miss: true
+          path: |
+            collector/feed-work/raw
+            collector/feed-work/cache
+            collector/feed-work/reference
+            collector/feed-work/extractions
+          key: feed-work-v2-${{ github.run_id }}
+          restore-keys: feed-work-v2-
+
+      - name: 캐시에 딸려 온 첨부 원본 지우기·글자 캐시 가리기
+        run: |
+          rm -rf feed-work/raw/files
+          $LOG node scripts/feed/mask-cache.mjs feed-work
+
+      - name: 출처 목록 검사
+        run: $LOG node scripts/feed/check-sources.mjs
+
+      - name: 지난 색인 지우기
+        run: rm -f feed-work/raw/index.json
+
+      - name: 지난 상태(feed-state 가지)
+        id: state
+        run: |
+          mkdir -p feed-work/state feed-work/extractions
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          set +e; git ls-remote --exit-code --heads "$STATE_REPO" feed-state >/dev/null; rc=$?; set -e
+          if [ "$rc" -eq 0 ]; then
+            git -C "$GITHUB_WORKSPACE" fetch -q --depth=1 "$STATE_REPO" feed-state
+            git -C "$GITHUB_WORKSPACE" archive FETCH_HEAD | tar -x -C feed-work/state
+            if [ ! -f feed-work/state/feed.json ] && [ ! -d feed-work/state/extractions ]; then
+              echo "::error::feed-state 가지는 있는데 복원한 것이 없음"; exit 1
+            fi
+            if [ -d feed-work/state/extractions ]; then cp feed-work/state/extractions/*.json feed-work/extractions/ 2>/dev/null || true; fi
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::상태 저장소에 feed-state가 없음 — 옮기는 날 시드를 먼저 한다(빈 상태로 돌지 않는다)"; exit 1
+          else
+            echo "::error::feed-state 가지를 확인하지 못함(ls-remote $rc)"; exit 1
+          fi
+          echo "had=$(ls feed-work/extractions | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "prev=$(git -C "$GITHUB_WORKSPACE" rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 다시 돌릴 묶음 고르기
+        id: groups
+        env:
+          FEED_GROUPS: ${{ inputs.groups }}
+          INCLUDE_RECENT: ${{ inputs.include_recent }}
+          EXTRACT_ONLY: ${{ inputs.extract_only }}
+          EXTRACT_ACCEPT: ${{ inputs.extract_accept }}
+        run: $LOG node scripts/feed/select-groups.mjs
+
+      - name: 검색으로 새 공고 찾기
+        id: discover
+        if: steps.groups.outputs.skip != '1'
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EXTRACT_MODEL: ${{ vars.EXTRACT_MODEL }}
+          EXTRACT_MONTH_SOFT_USD: ${{ vars.EXTRACT_MONTH_SOFT_USD }}
+          DISCOVER_EFFORT: ${{ vars.DISCOVER_EFFORT }}
+          DISCOVER_EVERY_DAYS: ${{ vars.DISCOVER_EVERY_DAYS }}
+        run: $LOG node scripts/feed/discover.mjs
+
+      - name: 받기
+        id: fetch
+        if: steps.groups.outputs.skip != '1'
+        continue-on-error: true
+        timeout-minutes: 21
+        env:
+          NOTICE_SOURCES: ${{ steps.groups.outputs.notice_sources }}
+          REPO_PRIVATE: ${{ github.event.repository.private && '1' || '' }}
+          GROUP_ONLY: ${{ steps.groups.outputs.only }}
+          GOV24_SERVICE_KEY: ${{ secrets.GOV24_SERVICE_KEY }}
+          FETCH_RELAY_URL: ${{ secrets.FETCH_RELAY_URL }}
+          FETCH_RELAY_TOKEN: ${{ secrets.FETCH_RELAY_TOKEN }}
+          FETCH_CONCURRENCY: ${{ vars.FETCH_CONCURRENCY }}
+          SOURCE_MAX_SECONDS: ${{ vars.SOURCE_MAX_SECONDS }}
+        run: |
+          set -- scripts/feed/fetch.mjs
+          if [ -n "$NOTICE_SOURCES" ]; then set -- "$@" --only "$NOTICE_SOURCES"; fi
+          if [ -n "$GROUP_ONLY" ]; then set -- "$@" --only "$GROUP_ONLY"; fi
+          $LOG node "$@"
+
+      - name: 첨부 읽기
+        id: read
+        if: steps.groups.outputs.skip != '1'
+        continue-on-error: true
+        timeout-minutes: 12
+        run: $LOG node scripts/feed/read.mjs
+
+      - name: 자동 추출
+        id: extract
+        if: steps.groups.outputs.skip != '1'
+        continue-on-error: true
+        timeout-minutes: 14
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EXTRACT_MODEL: ${{ inputs.extract_model || vars.EXTRACT_MODEL }}
+          EXTRACT_CONCURRENCY: '3'
+          EXTRACT_MAX_SECONDS: '420'
+          EXTRACT_EFFORT: ${{ inputs.extract_effort || vars.EXTRACT_EFFORT }}
+          EXTRACT_COMPARE: ${{ (inputs.extract_model != '' || inputs.extract_effort != '') && '1' || '' }}
+          EXTRACT_MAX_USD: ${{ vars.EXTRACT_MAX_USD }}
+          EXTRACT_MAX_NOTICES: ${{ vars.EXTRACT_MAX_NOTICES }}
+          EXTRACT_MONTH_SOFT_USD: ${{ vars.EXTRACT_MONTH_SOFT_USD }}
+          REFRESH_PUBLISH_CRITERIA: ${{ vars.REFRESH_PUBLISH_CRITERIA }}
+          EXTRACT_ONLY: ${{ inputs.extract_only }}
+          EXTRACT_FORCE: ${{ inputs.extract_force }}
+          EXTRACT_ONLY_STRICT: ${{ inputs.extract_only_strict }}
+          EXTRACT_ACCEPT: ${{ inputs.extract_accept }}
+          EXTRACT_REJECT: ${{ inputs.extract_reject }}
+        run: |
+          set -- scripts/feed/extract.mjs
+          if [ -n "$EXTRACT_ONLY" ]; then set -- "$@" --only "$EXTRACT_ONLY"; fi
+          if [ "$EXTRACT_FORCE" = "true" ]; then set -- "$@" --force; fi
+          if [ "$EXTRACT_ONLY_STRICT" = "true" ]; then set -- "$@" --only-strict; fi
+          if [ -n "$EXTRACT_ACCEPT" ]; then set -- "$@" --accept "$EXTRACT_ACCEPT"; fi
+          if [ -n "$EXTRACT_REJECT" ]; then set -- "$@" --reject "$EXTRACT_REJECT"; fi
+          $LOG node "$@"
+
+      - name: 조립·검증
+        id: build
+        if: steps.groups.outputs.skip != '1'
+        run: |
+          if [ -f feed-work/state/feed.json ]; then $LOG node scripts/feed/build.mjs --previous feed-work/state/feed.json --previous-audit feed-work/state/audit-last.json
+          else $LOG node scripts/feed/build.mjs; fi
+
+      - name: 묶음별 출처 상태
+        if: always() && steps.fetch.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          FETCH_OUTCOME: ${{ steps.fetch.outcome }}
+          READ_OUTCOME: ${{ steps.read.outcome }}
+        run: $LOG node scripts/feed/group-report.mjs
+
+      - name: 나누기·서명
+        id: publish
+        if: steps.groups.outputs.skip != '1' && github.ref == 'refs/heads/main'
+        env:
+          FEED_SIGNING_KEY: ${{ secrets.FEED_SIGNING_KEY }}
+          BOARD_LINKS_PUBLISH: ${{ vars.BOARD_LINKS_PUBLISH }}
+        run: $LOG node scripts/feed/publish.mjs --key-id k1
+
+      - name: 공개 저장소에 올리기(gh-pages)
+        id: deploy
+        if: steps.groups.outputs.skip != '1' && github.ref == 'refs/heads/main'
+        env:
+          FEED_DEPLOY_KEY: ${{ secrets.FEED_DEPLOY_KEY }}
+          BOARD_LINKS_TAKEDOWN: ${{ vars.BOARD_LINKS_TAKEDOWN }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$FEED_DEPLOY_KEY" > ~/.ssh/feed_deploy && chmod 600 ~/.ssh/feed_deploy
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/feed_deploy -o IdentitiesOnly=yes"
+          rm -rf "$RUNNER_TEMP/site" "$RUNNER_TEMP/old" && mkdir -p "$RUNNER_TEMP/site"
+          cp -r feed-work/out/v2 "$RUNNER_TEMP/site/v2"
+          touch "$RUNNER_TEMP/site/.nojekyll"
+          set +e; git ls-remote --exit-code --heads git@github.com:kevinsu92/scholarship-feed.git gh-pages >/dev/null; rc=$?; set -e
+          if [ "$rc" -eq 0 ]; then
+            git clone -q --depth 1 -b gh-pages git@github.com:kevinsu92/scholarship-feed.git "$RUNNER_TEMP/old"
+            $LOG node scripts/feed/publish.mjs carry --from "$RUNNER_TEMP/old/v2" --to "$RUNNER_TEMP/site/v2"
+          elif [ "$rc" -ne 2 ]; then
+            echo "::error::공개 저장소 gh-pages를 확인하지 못함(ls-remote $rc)"; exit 1
+          fi
+          cd "$RUNNER_TEMP/site"
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name=feed-bot -c user.email=feed-bot@users.noreply.github.com commit -q -m "피드 $(date -u +%FT%TZ)"
+          for delay in 20 40 end; do
+            git push -q -f git@github.com:kevinsu92/scholarship-feed.git gh-pages && break
+            if [ "$delay" = end ]; then echo "::error::gh-pages push 3번 실패"; exit 1; fi
+            echo "::warning::gh-pages push 실패 — ${delay}초 뒤 다시"; sleep "$delay"
+          done
+
+      - name: 상태 커밋(feed-state)
+        if: always() && github.ref == 'refs/heads/main' && steps.state.outcome == 'success' && steps.groups.outcome == 'success' && steps.groups.outputs.skip != '1'
+        env:
+          HAD: ${{ steps.state.outputs.had }}
+          PREV: ${{ steps.state.outputs.prev }}
+          PUBLISHED: ${{ steps.deploy.outcome == 'success' }}
+        run: |
+          now=$(ls feed-work/extractions | wc -l | tr -d ' ')
+          if [ "$now" -lt $(( ${HAD:-0} / 2 )) ]; then echo "::error::추출이 ${HAD}개에서 ${now}개로 줄어 상태를 쓰지 않음"; exit 1; fi
+          rm -rf "$RUNNER_TEMP/state" && mkdir -p "$RUNNER_TEMP/state/extractions"
+          cp feed-work/extractions/*.json "$RUNNER_TEMP/state/extractions/" 2>/dev/null || true
+          if [ "$PUBLISHED" = "true" ]; then cp feed-work/out/v1/feed.json "$RUNNER_TEMP/state/feed.json"
+          elif [ -f feed-work/state/feed.json ]; then cp feed-work/state/feed.json "$RUNNER_TEMP/state/feed.json"; fi
+          if [ -f feed-work/reports/audit-last.json ]; then cp feed-work/reports/audit-last.json "$RUNNER_TEMP/state/audit-last.json"; fi
+          cd "$RUNNER_TEMP/state"
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          git init -q -b feed-state
+          git add -A
+          git -c user.name=feed-bot -c user.email=feed-bot@users.noreply.github.com commit -q -m "상태 $(date -u +%FT%TZ)"
+          if [ -n "$PREV" ]; then git -C "$GITHUB_WORKSPACE" push -q -f "$STATE_REPO" "$PREV:refs/heads/feed-state-prev" || echo "::warning::feed-state-prev를 남기지 못함"; fi
+          for delay in 20 40 end; do
+            git push -q -f "$STATE_REPO" HEAD:refs/heads/feed-state && break
+            if [ "$delay" = end ]; then echo "::error::feed-state push 3번 실패"; exit 1; fi
+            echo "::warning::feed-state push 실패 — ${delay}초 뒤 다시"; sleep "$delay"
+          done
+
+      - name: 추출·조립 보고서
+        if: always() && github.repository == 'kevinsu92/scholarship-deadline'
+        uses: actions/upload-artifact@v4
+        with:
+          name: feed-reports
+          path: |
+            collector/feed-work/reports/read-last.json
+            collector/feed-work/reports/extract-last.json
+            collector/feed-work/reports/discover-last.json
+            collector/feed-work/reports/build-last.json
+            collector/feed-work/reports/group-last.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: 저장소 공개 여부(보류 원문 산출물용)
+        id: visibility
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null || echo unknown)" >> "$GITHUB_OUTPUT"
+
+      - name: 보류된 보조금24 원문 꺼내기(대조용)
+        if: always() && github.repository == 'kevinsu92/scholarship-deadline' && steps.visibility.outputs.private == 'true'
+        run: $LOG node scripts/feed/held-gov24-raw.mjs --work feed-work || echo "::warning::보류된 보조금24 원문 꺼내기 실패(대조 산출물 없음 — 피드에는 영향 없음)"
+
+      - name: 보류된 보조금24 원문 산출물(비공개·3일)
+        if: always() && github.repository == 'kevinsu92/scholarship-deadline' && steps.visibility.outputs.private == 'true' && hashFiles('collector/feed-work/review/held-gov24-raw.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gov24-held-raw
+          path: collector/feed-work/review/held-gov24-raw.json
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: 첨부 원본 지우기·글자 캐시 가리기(캐시 저장 전)
+        if: always()
+        run: |
+          rm -rf feed-work/raw/files
+          $LOG node scripts/feed/mask-cache.mjs feed-work
+
+      - name: 원문·첨부 글자 캐시 저장
+        if: always() && github.ref == 'refs/heads/main' && steps.state.outcome == 'success' && (steps.cache.outputs.restored == '1' || steps.oldcache.outputs.cache-hit == 'true')
+        run: |
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          rm -rf "$RUNNER_TEMP/cache-out" && mkdir -p "$RUNNER_TEMP/cache-out"
+          dirs=$(for d in raw cache reference extractions; do [ -d "feed-work/$d" ] && echo "$d"; done)
+          if [ -z "$dirs" ]; then echo "::warning::저장할 캐시가 없음"; exit 0; fi
+          tar -czf "$RUNNER_TEMP/cache-out/cache.tar.gz" -C feed-work $dirs
+          size=$(stat -c %s "$RUNNER_TEMP/cache-out/cache.tar.gz")
+          echo "캐시 $((size / 1048576))MB"
+          if [ "$size" -gt 83886080 ]; then echo "::error::캐시가 80MB를 넘어 올리지 않음($((size / 1048576))MB) — 오래된 raw를 줄인다(PUBLIC-MOVE.md)"; exit 1; fi
+          if [ -d "$RUNNER_TEMP/cache-git/.git" ]; then git -C "$RUNNER_TEMP/cache-git" push -q -f "$STATE_REPO" FETCH_HEAD:refs/heads/feed-cache-prev || echo "::warning::feed-cache-prev를 남기지 못함"; fi
+          cd "$RUNNER_TEMP/cache-out"
+          git init -q -b feed-cache
+          git add -A
+          git -c user.name=feed-bot -c user.email=feed-bot@users.noreply.github.com commit -q -m "캐시 $(date -u +%FT%TZ)"
+          for delay in 20 40 end; do
+            git push -q -f "$STATE_REPO" HEAD:refs/heads/feed-cache && break
+            if [ "$delay" = end ]; then echo "::error::feed-cache push 3번 실패(다음 실행은 지난 캐시로 돈다)"; exit 1; fi
+            echo "::warning::feed-cache push 실패 — ${delay}초 뒤 다시"; sleep "$delay"
+          done
+
+      - name: 비공개 로그 올리기(feed-logs)
+        if: always() && env.PUBLIC_LOG == '1'
+        continue-on-error: true
+        env:
+          RUN_DIR: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          rm -rf "$RUNNER_TEMP/logs-git" && mkdir -p "$RUNNER_TEMP/logs-git/runs"
+          set +e; git ls-remote --exit-code --heads "$STATE_REPO" feed-logs >/dev/null; rc=$?; set -e
+          if [ "$rc" -eq 0 ]; then
+            git init -q "$RUNNER_TEMP/logs-old" && git -C "$RUNNER_TEMP/logs-old" fetch -q --depth=1 "$STATE_REPO" feed-logs
+            git -C "$RUNNER_TEMP/logs-old" archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/logs-git"
+            ls -1 "$RUNNER_TEMP/logs-git/runs" | sort -n | head -n -20 | while read -r d; do rm -rf "$RUNNER_TEMP/logs-git/runs/$d"; done
+          fi
+          mkdir -p "$RUNNER_TEMP/logs-git/runs/$RUN_DIR"
+          cp -r feed-work/private-logs/. "$RUNNER_TEMP/logs-git/runs/$RUN_DIR/" 2>/dev/null || true
+          cp .source-commit "$RUNNER_TEMP/logs-git/runs/$RUN_DIR/source-commit" 2>/dev/null || true
+          if [ -d feed-work/reports ]; then mkdir -p "$RUNNER_TEMP/logs-git/runs/$RUN_DIR/reports" && cp feed-work/reports/*-last.json "$RUNNER_TEMP/logs-git/runs/$RUN_DIR/reports/" 2>/dev/null || true; fi
+          cd "$RUNNER_TEMP/logs-git"
+          git init -q -b feed-logs
+          git add -A
+          git -c user.name=feed-bot -c user.email=feed-bot@users.noreply.github.com commit -q -m "로그 $RUN_DIR"
+          for delay in 20 40 end; do
+            git push -q -f "$STATE_REPO" HEAD:refs/heads/feed-logs && break
+            if [ "$delay" = end ]; then echo "::error::feed-logs push 3번 실패 — 이 실행의 자세한 로그가 없다"; exit 1; fi
+            sleep "$delay"
+          done
+          echo "비공개 로그: 상태 저장소 feed-logs runs/$RUN_DIR"
+
+      - name: 예약 실행 다시 켜기
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh workflow enable feed.yml --repo "$REPO" || true
+
+      - name: Actions 사용 분
+        if: always() && github.repository == 'kevinsu92/scholarship-deadline'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: $LOG node scripts/feed/usage-report.mjs
+
+      - name: 자물쇠 풀기
+        if: always() && env.LOCK_OWNED == '1'
+        working-directory: ${{ runner.temp }}
+        run: |
+          export GIT_SSH_COMMAND="$STATE_SSH"
+          git -C "$RUNNER_TEMP/lock" fetch -q --depth=1 "$STATE_REPO" feed-lock
+          read -r lrepo lrun lat < <(git -C "$RUNNER_TEMP/lock" show FETCH_HEAD:lock)
+          if [ "$lrun" = "$GITHUB_RUN_ID" ]; then git -C "$RUNNER_TEMP/lock" push -q "$STATE_REPO" --delete feed-lock && echo "자물쇠 풂"
+          else echo "::warning::자물쇠가 다른 실행($lrepo run $lrun) 것 — 그대로 둔다"; fi
+
+      - name: 상태 저장소 키 지우기
+        if: always()
+        working-directory: ${{ runner.temp }}
+        run: rm -f ~/.ssh/state_key ~/.ssh/feed_deploy
+
+      - name: 받기·추출·격리를 드러내기
+        if: always() && steps.groups.outcome == 'success' && steps.groups.outputs.skip != '1'
+        env:
+          FEED_GROUPS_RUN: ${{ steps.groups.outputs.only != '' && '1' || '' }}
+          FEED_GROUPS_PREV_FAILED: ${{ steps.groups.outputs.prev_failed }}
+        run: $LOG node scripts/feed/gate.mjs
+
+  guard:
+    if: vars.FEED_SCHEDULE_HERE == '1' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.trigger == 'cron-worker' && !(inputs.groups || inputs.extract_only || inputs.extract_only_strict || inputs.extract_force || inputs.extract_model || inputs.extract_effort || inputs.extract_accept || inputs.extract_reject || inputs.include_recent)))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      skip: ${{ steps.guard.outputs.skip }}
+      kind: ${{ steps.guard.outputs.kind }}
+    steps:
+      - name: 공개 모드 로그 켜기
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          priv=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null || echo unknown)
+          if [ "$GITHUB_REPOSITORY" = "kevinsu92/scholarship-deadline" ] && [ "$priv" = "true" ]; then
+            { echo "LOG="; echo "PUBLIC_LOG="; } >> "$GITHUB_ENV"; echo "비공개 저장소 — 공개 모드 로그 끔"
+          else
+            { echo "LOG=node scripts/feed/public-log.mjs"; echo "PUBLIC_LOG=1"; } >> "$GITHUB_ENV"; echo "공개 모드 로그 켬"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            collector/scripts/feed/schedule-guard.mjs
+            collector/scripts/feed/usage-report.mjs
+            collector/scripts/feed/public-log.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: 예약 실행 문지기(수집 영향 없음)
+        id: guard
+        working-directory: collector
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SCHEDULE: ${{ github.event.schedule }}
+          FEED_FREE_MINUTES: ${{ github.repository == 'kevinsu92/scholarship-deadline' && (vars.FEED_FREE_MINUTES || '3000') || '1000000' }}
+          TRIGGER: ${{ inputs.trigger }}
+          TOKEN_DAYS: ${{ inputs.token_days }}
+          OTHER_INPUTS: ${{ (inputs.groups || inputs.extract_only || inputs.extract_only_strict || inputs.extract_force || inputs.extract_model || inputs.extract_effort || inputs.extract_accept || inputs.extract_reject || inputs.include_recent) && 'other' || '' }}
+          DISPATCH_WORKER: ${{ vars.DISPATCH_WORKER }}
+        run: $LOG node scripts/feed/schedule-guard.mjs
+
+  log-check:
+    needs: feed
+    if: ${{ always() && github.repository != 'kevinsu92/scholarship-deadline' && needs.feed.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: feed-fallback
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kevinsu92/scholarship-feed-state
+          ref: collector
+          ssh-key: ${{ secrets.STATE_KEY }}
+          persist-credentials: false
+      - name: 수집 job 로그 받아 훑기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "feed") | .id')
+          if [ -z "$job" ]; then echo "::error::수집 job을 찾지 못함"; exit 1; fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/feed.log"
+          gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/feed.yml?ref=main" --jq .content | base64 -d > "$RUNNER_TEMP/feed.yml"
+          node collector/scripts/feed/public-log-check.mjs "$RUNNER_TEMP/feed.log" "$RUNNER_TEMP/feed.yml" collector/scripts/feed/public-log.mjs
