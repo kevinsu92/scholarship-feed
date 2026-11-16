@@ -49,7 +49,7 @@ export const TOKEN_WARN_DAYS = 14;
 /** 정기·보조 문지기가 대신 부르기 실행을 찾는 창(시간) — 하루 세 번이니 26시간 안에 한 번도 없으면 Worker·토큰이 죽은 것 */
 export const WORKER_SILENT_HOURS = 26;
 /** 보조 cron 식 — feed.yml과 같아야 한다(시험이 본다) */
-export const AUX_CRON = '7 1,5,10 * * *';   // 11-16~12-01 꺼짐(feed.yml에서 뺌 — 무료 분 아끼기), 12-01에 되살린다
+export const AUX_CRON = '7 1,5,10 * * *';   // feed.yml 보조 cron과 같아야 한다(11-16 공개 저장소 이전과 함께 되살림)
 /** 문지기가 세는 발행 단계 이름 — feed.yml의 id: deploy 단계 이름과 같아야 한다(시험이 본다) */
 export const PUBLISH_STEP = '공개 저장소에 올리기(gh-pages)';
 /** 정기 실행 한 번 어림의 바닥(분) — 이번 달 실측 평균이 이보다 작아도 이만큼은 남긴다 */

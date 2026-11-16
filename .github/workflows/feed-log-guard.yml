@@ -1,0 +1,41 @@
+# 장학 공고 피드(gh-pages)를 만들어 서명·게시하는 워크플로입니다. 수집기 코드는 별도 비공개 저장소에 있고, 이 파일은 그 저장소 워크플로의 사본입니다(여기서 고치지 않습니다 — README 참고).
+name: feed-log-guard
+
+on:
+  workflow_run:
+    workflows: [feed]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  delete-logs:
+    if: github.repository != 'kevinsu92/scholarship-deadline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: log-check 실패면 그 실행 로그 지우기
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          set -o pipefail
+          jobs=''
+          for delay in 20 40 end; do
+            jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/jobs?filter=latest" --jq '[.jobs[] | {name, conclusion}]') && break
+            if [ "$delay" = end ]; then jobs='unknown'; fi
+            sleep "$delay"
+          done
+          feed=$(echo "$jobs" | jq -r '[.[] | select(.name == "feed") | .conclusion] | first // "none"' 2>/dev/null || echo unknown)
+          check=$(echo "$jobs" | jq -r '[.[] | select(.name == "log-check") | .conclusion] | first // "none"' 2>/dev/null || echo unknown)
+          echo "수집 $feed · 로그 검사 $check"
+          if [ "$feed" = "skipped" ] || [ "$feed" = "none" ] && [ "$jobs" != "unknown" ]; then exit 0; fi
+          if [ "$check" = "success" ]; then exit 0; fi
+          for delay in 20 40 end; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/logs" && break
+            if [ "$delay" = end ]; then echo "::error::feed 실행 $RUN 로그를 지우지 못함 — 바로 gh run delete $RUN -R $GITHUB_REPOSITORY"; exit 1; fi
+            sleep "$delay"
+          done
+          echo "::error::feed 실행 $RUN 로그를 지웠다(공개 로그 검사 $check) — 원인은 상태 저장소 feed-logs에서 본다"
+          exit 1
