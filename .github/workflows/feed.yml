@@ -659,6 +659,22 @@ jobs:
             lines=$(wc -l < "$RUNNER_TEMP/job-$job.log" | tr -d ' ')
             if [ "$lines" -lt "$min" ] || ! grep -q '\[공개 모드 로그\] ' "$RUNNER_TEMP/job-$job.log"; then echo "::error::job $job 로그를 못 읽음($lines줄) — 검사 못 함"; fail=1; continue; fi
             echo "job $job 로그 $lines줄"
-            node collector/scripts/feed/public-log-check.mjs --ids "$RUNNER_TEMP/ids.txt" "$RUNNER_TEMP/job-$job.log" "$RUNNER_TEMP/feed.yml" collector/scripts/feed/public-log.mjs || fail=1
+            node collector/scripts/feed/public-log-check.mjs --ids "$RUNNER_TEMP/ids.txt" --dump "$RUNNER_TEMP/hits.txt" "$RUNNER_TEMP/job-$job.log" "$RUNNER_TEMP/feed.yml" collector/scripts/feed/public-log.mjs || fail=1
           done
+          echo "fail=$fail" >> "$GITHUB_OUTPUT"
           exit "$fail"
+      - name: 걸린 줄 비공개로 남기기
+        if: failure()
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          [ -f "$RUNNER_TEMP/hits.txt" ] || { echo "걸린 줄 파일 없음"; exit 0; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$STATE_KEY" > ~/.ssh/state_key && chmod 600 ~/.ssh/state_key
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/state_key -o IdentitiesOnly=yes"
+          rm -rf "$RUNNER_TEMP/lc" && mkdir -p "$RUNNER_TEMP/lc" && cp "$RUNNER_TEMP/hits.txt" "$RUNNER_TEMP/lc/$GITHUB_RUN_ID.txt" && cd "$RUNNER_TEMP/lc"
+          git init -q -b feed-logcheck && git add -A && git -c user.name=feed-bot -c user.email=feed-bot@users.noreply.github.com commit -q -m "로그 검사 $GITHUB_RUN_ID"
+          git push -q -f git@github.com:kevinsu92/scholarship-feed-state.git HEAD:refs/heads/feed-logcheck || true
+          rm -f ~/.ssh/state_key
+          echo "걸린 줄: 상태 저장소 feed-logcheck $GITHUB_RUN_ID.txt"
