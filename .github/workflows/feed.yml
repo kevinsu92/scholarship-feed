@@ -1,4 +1,4 @@
-# 장학 공고 피드(gh-pages)를 만들어 서명·게시하는 워크플로입니다. 수집기 코드는 별도 비공개 저장소에 있고, 이 파일은 그 저장소 워크플로의 사본입니다(여기서 고치지 않습니다 — README 참고).
+# 장학 공고 피드(gh-pages)를 만들어 서명·게시하는 워크플로입니다. 수집기 코드는 별도 비공개 저장소에 있고, 이 파일은 그 저장소 워크플로의 사본입니다 — 여기서 고치지 않습니다(README 참고).
 name: feed
 run-name: ${{ inputs.cache_handoff && 'feed · 캐시 넘기기' || inputs.groups && (github.repository == 'kevinsu92/scholarship-deadline' && format('feed · 묶음 {0}', inputs.groups) || 'feed · 묶음') || (inputs.extract_only || inputs.extract_accept || inputs.extract_reject) && 'feed · 추출' || inputs.trigger == 'cron-worker' && !(inputs.groups || inputs.extract_only || inputs.extract_only_strict || inputs.extract_force || inputs.extract_model || inputs.extract_effort || inputs.extract_accept || inputs.extract_reject || inputs.include_recent || inputs.cache_handoff || inputs.lock_takeover) && (inputs.token_days && 'feed · 대신 부르기' || 'feed · 대신 부르기(손)') || 'feed' }}
 
