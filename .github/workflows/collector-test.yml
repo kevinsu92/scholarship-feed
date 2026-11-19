@@ -1,0 +1,105 @@
+# 장학 공고 피드(gh-pages)를 만들어 서명·게시하는 워크플로입니다. 수집기 코드는 별도 비공개 저장소에 있고, 이 파일은 그 저장소 워크플로의 사본입니다 — 여기서 고치지 않습니다(README 참고).
+name: collector-test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/collector-pin'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.repository == 'kevinsu92/scholarship-feed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: feed-fallback
+    defaults:
+      run:
+        working-directory: collector
+    steps:
+      - name: "[환경] main 가지만"
+        working-directory: ${{ runner.temp }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::main 가지가 아니라 멈춘다"; exit 1; fi
+
+      - name: "[환경] 수집기 코드(상태 저장소 collector 사본)"
+        uses: actions/checkout@v5
+        with:
+          repository: kevinsu92/scholarship-feed-state
+          ref: collector
+          ssh-key: ${{ secrets.STATE_KEY }}
+          persist-credentials: false
+
+      - name: "[환경] 받기 키 남지 않음 확인"
+        working-directory: ${{ runner.temp }}
+        run: |
+          left=$(grep -rIl -e 'BEGIN OPENSSH PRIVATE KEY' -e 'BEGIN RSA PRIVATE KEY' -e 'BEGIN EC PRIVATE KEY' -e 'BEGIN PRIVATE KEY' "$RUNNER_TEMP" "$HOME/.ssh" 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$left" != 0 ]; then echo "::error::받기 키가 러너에 남음(${left}개) — 시험을 돌리지 않는다"; exit 1; fi
+          git -C "$GITHUB_WORKSPACE" config --unset-all core.sshCommand 2>/dev/null || true
+          echo "받기 키 남지 않음"
+
+      - name: "[환경] 수집기 사본 확인(collector-pin)"
+        id: pin
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          readpin() {
+            for delay in 20 40 end; do
+              if v=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/collector-pin?ref=$1" --jq .content | base64 -d | tr -d ' \n'); then echo "$v"; return 0; fi
+              if [ "$delay" = end ]; then return 1; fi
+              sleep "$delay"
+            done
+          }
+          head=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          now=$(readpin main) || { echo "::error::collector-pin을 읽지 못함(API 실패 세 번) — GitHub 오류일 수 있다, 다시 돌린다"; exit 1; }
+          at=$now
+          if [ "$GITHUB_EVENT_NAME" = push ]; then at=$(readpin "$GITHUB_SHA") || { echo "::error::push 시점 collector-pin을 읽지 못함 — 다시 돌린다"; exit 1; }; fi
+          if [ -n "$at" ] && [ "$head" = "$at" ]; then echo "PIN=${head:0:12}" >> "$GITHUB_ENV"; echo "수집기 사본 핀 맞음 ${head:0:12}"; exit 0; fi
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$now" ] && [ "$now" != "$at" ] && [ "$head" = "$now" ]; then
+            echo "::notice::이 push 뒤에 새 핀(${now:0:12})이 올라와 사본이 앞서 있다 — 그 핀의 실행에 넘기고 끝낸다"; echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "::error::수집기 사본(${head:0:12})이 collector-pin(${at:-없음})과 다름 — feed-sync 실행 목록부터 보고(collector 가지가 핀보다 앞선 것인지) feed-sync.yml을 다시 돌린다"; exit 1
+
+      - uses: actions/setup-node@v5
+        if: steps.pin.outputs.skip != '1'
+        with:
+          node-version: '22.19'
+
+      - name: "[환경] 설치(dev 포함, 스크립트 안 돎)"
+        if: steps.pin.outputs.skip != '1'
+        run: |
+          for delay in 20 40 end; do
+            if npm ci --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/npm-ci.log" 2>&1; then echo "설치 끝"; exit 0; fi
+            if [ "$delay" = end ]; then echo "::error::npm ci 세 번 실패 — 레지스트리 일시 장애일 수 있다, 손 실행으로 다시 돌린다"; exit 1; fi
+            echo "설치 실패 — ${delay}초 뒤 다시"; sleep "$delay"
+          done
+
+      - name: "[시험] 수집기 시험(npm test, 병렬 2, 바깥 연결 막음)"
+        if: steps.pin.outputs.skip != '1'
+        env:
+          COLLECTOR_TEST_CONCURRENCY: '2'
+          COLLECTOR_TEST_MIRROR: '1'
+          NODE_OPTIONS: --import ${{ github.workspace }}/collector/test/support/no-network.mjs
+        run: |
+          for v in GITHUB_STEP_SUMMARY GITHUB_ENV GITHUB_OUTPUT GITHUB_PATH; do : > "$RUNNER_TEMP/discard-$v"; export "$v=$RUNNER_TEMP/discard-$v"; done
+          export NO_NETWORK_LOG="$RUNNER_TEMP/no-network.log"; : > "$NO_NETWORK_LOG"
+          set +e
+          npm test > "$RUNNER_TEMP/test.log" 2>&1
+          code=$?
+          set -e
+          min=$(node -e "import('./test/support/mirror.mjs').then(m => console.log(m.COPY_MIN_TESTS))")
+          max=$(node -e "import('./test/support/mirror.mjs').then(m => console.log(m.COPY_MAX_SKIPPED))")
+          counts_ok=0
+          line=$(node scripts/test-counts.mjs "$RUNNER_TEMP/test.log" --min-tests "$min" --max-skipped "$max") || counts_ok=$?
+          blocked=$(wc -l < "$NO_NETWORK_LOG" | tr -d ' ')
+          act="같은 핀으로 나간 피드의 마감·금액부터 원문과 대조하세요(틀렸으면 PUBLIC-MOVE.md 되돌리기), 재현은 collector/scripts/test-mirror.sh"
+          if [ "$code" -ne 0 ] || [ "$counts_ok" -ne 0 ] || [ "$blocked" != 0 ]; then
+            echo "::error::수집기 시험 실패. ${act}. ${line}, 바깥 연결 막음 ${blocked}번. 사본 핀 ${PIN}"
+            exit 1
+          fi
+          echo "수집기 시험 통과(사본 안 파일만 — 건너뜀은 본체 로컬 npm test에서만 돈다). ${line}, 바깥 연결 막음 0번. 사본 핀 ${PIN}"
