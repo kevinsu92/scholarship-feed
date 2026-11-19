@@ -16,7 +16,7 @@ jobs:
     if: github.repository == 'kevinsu92/scholarship-feed'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: feed-fallback
+    environment: collector-test
     defaults:
       run:
         working-directory: collector
@@ -27,21 +27,25 @@ jobs:
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::main 가지가 아니라 멈춘다"; exit 1; fi
 
       - name: "[환경] 수집기 코드(상태 저장소 collector 사본)"
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: kevinsu92/scholarship-feed-state
           ref: collector
-          ssh-key: ${{ secrets.STATE_KEY }}
+          ssh-key: ${{ secrets.STATE_READ_KEY }}
           persist-credentials: false
 
       - name: "[환경] 받기 키 지우고 남지 않음 확인"
         working-directory: ${{ runner.temp }}
         run: |
-          keys() { grep -rIl -e 'BEGIN OPENSSH PRIVATE KEY' -e 'BEGIN RSA PRIVATE KEY' -e 'BEGIN EC PRIVATE KEY' -e 'BEGIN PRIVATE KEY' "$RUNNER_TEMP" "$HOME/.ssh" 2>/dev/null || true; }
-          found=$(keys | wc -l | tr -d ' ')
-          keys | while IFS= read -r f; do rm -f -- "$f"; done
+          keys() {
+            set -- "$RUNNER_TEMP"; [ -d "$HOME/.ssh" ] && set -- "$@" "$HOME/.ssh"
+            rc=0; grep -rIl -e 'BEGIN OPENSSH PRIVATE KEY' -e 'BEGIN RSA PRIVATE KEY' -e 'BEGIN EC PRIVATE KEY' -e 'BEGIN PRIVATE KEY' "$@" > "$RUNNER_TEMP/.keys.list" 2>/dev/null || rc=$?
+            if [ "$rc" -gt 1 ]; then echo "::error::키 검사 실패(grep $rc) — 시험을 돌리지 않는다"; exit 1; fi
+          }
+          keys; found=$(wc -l < "$RUNNER_TEMP/.keys.list" | tr -d ' ')
+          while IFS= read -r f; do rm -f -- "$f"; done < "$RUNNER_TEMP/.keys.list"
           git -C "$GITHUB_WORKSPACE" config --unset-all core.sshCommand 2>/dev/null || true
-          left=$(keys | wc -l | tr -d ' ')
+          keys; left=$(wc -l < "$RUNNER_TEMP/.keys.list" | tr -d ' '); rm -f "$RUNNER_TEMP/.keys.list"
           if [ "$left" != 0 ]; then echo "::error::받기 키가 러너에 남음(${left}개) — 시험을 돌리지 않는다"; exit 1; fi
           echo "받기 키 ${found}개 지움, 남은 키 0"
 
@@ -68,7 +72,7 @@ jobs:
           fi
           echo "::error::수집기 사본(${head:0:12})이 collector-pin(${at:-없음})과 다름 — feed-sync 실행 목록부터 보고(collector 가지가 핀보다 앞선 것인지) feed-sync.yml을 다시 돌린다"; exit 1
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         if: steps.pin.outputs.skip != '1'
         with:
           node-version: '22.19'
