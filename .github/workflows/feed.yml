@@ -110,11 +110,11 @@ jobs:
 
       - name: 수집기 코드(비공개 저장소)
         if: github.repository == 'kevinsu92/scholarship-deadline'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: 수집기 코드(상태 저장소 collector 사본)
         if: github.repository != 'kevinsu92/scholarship-deadline'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: kevinsu92/scholarship-feed-state
           ref: collector
@@ -168,7 +168,7 @@ jobs:
           fi
           echo "::error::다른 수집 실행이 도는 중($lrepo run $lrun, ${age}초 전 시작) — 겹쳐 읽지 않게 멈춘다. 그 실행이 없으면 손 실행 입력 lock_takeover로 넘겨받는다"; exit 1
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '22.19'
           cache: npm
@@ -212,7 +212,7 @@ jobs:
       - name: 옛 Actions 캐시에서 이어 받기(한 번만)
         id: oldcache
         if: steps.cache.outputs.miss == '1' && github.repository == 'kevinsu92/scholarship-deadline'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           fail-on-cache-miss: true
           path: |
@@ -424,7 +424,7 @@ jobs:
 
       - name: 추출·조립 보고서
         if: always() && github.repository == 'kevinsu92/scholarship-deadline'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: feed-reports
           path: |
@@ -449,7 +449,7 @@ jobs:
 
       - name: 보류된 보조금24 원문 산출물(비공개·3일)
         if: always() && github.repository == 'kevinsu92/scholarship-deadline' && steps.visibility.outputs.private == 'true' && hashFiles('collector/feed-work/review/held-gov24-raw.json') != ''
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: gov24-held-raw
           path: collector/feed-work/review/held-gov24-raw.json
@@ -581,7 +581,7 @@ jobs:
             { echo "LOG=node scripts/feed/public-log.mjs"; echo "PUBLIC_LOG=1"; } >> "$GITHUB_ENV"; echo "공개 모드 로그 켬"
           fi
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             collector/scripts/feed/schedule-guard.mjs
@@ -620,7 +620,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: kevinsu92/scholarship-feed-state
           ref: collector
@@ -637,7 +637,7 @@ jobs:
             sleep "$delay"
           done
           if [ "$pin" != "$(git rev-parse HEAD)" ]; then echo "::error::검사기 사본이 collector-pin과 다름"; exit 1; fi
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '22.19'
       - name: 실행 로그 받아 훑기

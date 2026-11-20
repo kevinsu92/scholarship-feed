@@ -27,7 +27,7 @@ jobs:
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::main 가지가 아니라 멈춘다"; exit 1; fi
 
       - name: "[환경] 수집기 코드(상태 저장소 collector 사본)"
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kevinsu92/scholarship-feed-state
           ref: collector
@@ -72,7 +72,7 @@ jobs:
           fi
           echo "::error::수집기 사본(${head:0:12})이 collector-pin(${at:-없음})과 다름 — feed-sync 실행 목록부터 보고(collector 가지가 핀보다 앞선 것인지) feed-sync.yml을 다시 돌린다"; exit 1
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         if: steps.pin.outputs.skip != '1'
         with:
           node-version: '22.19'
