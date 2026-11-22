@@ -4,8 +4,8 @@ run-name: ${{ inputs.cache_handoff && 'feed · 캐시 넘기기' || inputs.group
 
 on:
   schedule:
-    - cron: "17 23,3,8 * * *"
-    - cron: "7 1,5,10 * * *"
+    - cron: "17 23 * * *"
+    - cron: "7 1 * * *"
   workflow_dispatch:
     inputs:
       extract_only:
@@ -51,7 +51,7 @@ on:
         required: false
         default: false
       trigger:
-        description: "예약 실행 대신 부르기 표지 — Cloudflare Worker cron(collector/dispatch)만 cron-worker로 쓴다. 이 값이면 문지기가 보조 예약 실행처럼 판정한다(2시간 40분 안 발행이면 건너뜀). 손으로는 비워 둔다(다른 입력과 함께 넣으면 손 실행으로 본다)"
+        description: "예약 실행 대신 부르기 표지 — Cloudflare Worker cron(collector/dispatch)만 cron-worker로 쓴다. 이 값이면 문지기가 보조 예약 실행처럼 판정한다(오늘 06:00 KST 이후 발행이면 건너뜀). 손으로는 비워 둔다(다른 입력과 함께 넣으면 손 실행으로 본다)"
         required: false
         default: ''
       cache_handoff:
@@ -82,7 +82,7 @@ jobs:
     needs: guard
     if: ${{ !cancelled() && needs.guard.outputs.skip != '1' && (vars.FEED_SCHEDULE_HERE == '1' || !(github.event_name == 'schedule' || inputs.trigger == 'cron-worker')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 56
+    timeout-minutes: 80
     environment: ${{ github.repository == 'kevinsu92/scholarship-deadline' && 'feed-publish' || 'feed-fallback' }}
     env:
       STATE_REPO: git@github.com:kevinsu92/scholarship-feed-state.git
@@ -314,12 +314,12 @@ jobs:
         id: extract
         if: steps.groups.outputs.skip != '1'
         continue-on-error: true
-        timeout-minutes: 14
+        timeout-minutes: 32
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EXTRACT_MODEL: ${{ inputs.extract_model || vars.EXTRACT_MODEL }}
           EXTRACT_CONCURRENCY: '3'
-          EXTRACT_MAX_SECONDS: '420'
+          EXTRACT_MAX_SECONDS: ${{ vars.EXTRACT_MAX_SECONDS || '420' }}
           EXTRACT_EFFORT: ${{ inputs.extract_effort || vars.EXTRACT_EFFORT }}
           EXTRACT_COMPARE: ${{ (inputs.extract_model != '' || inputs.extract_effort != '') && '1' || '' }}
           EXTRACT_MAX_USD: ${{ vars.EXTRACT_MAX_USD }}
